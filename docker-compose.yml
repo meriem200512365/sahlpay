@@ -1,0 +1,104 @@
+name: sahlpay
+
+networks:
+  default:
+    name: sahlpay-net
+
+volumes:
+  minio-data:
+
+services:
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION}
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  minio:
+    image: pgsty/silo:${SILO_TAG}
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data 
+
+  minio-init:
+    image: pgsty/mc
+    container_name: minio-init
+    depends_on:
+      - minio
+    restart: "no"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do sleep 2; done;
+      mc mb --ignore-existing local/lake;
+      mc ls local;
+      exit 0;"
+      
+
+  spark-master:
+    image: apache/spark:${SPARK_VERSION}
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master",
+              "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+
+  spark-worker-1:
+    image: apache/spark:${SPARK_VERSION}
+    container_name: spark-worker-1
+    depends_on:
+      - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker",
+              "--cores", "2", "--memory", "2g", "--webui-port", "8081",
+              "spark://spark-master:7077"]
+    ports:
+      - "8081:8081"
+
+  spark-worker-2:
+    image: apache/spark:${SPARK_VERSION}
+    container_name: spark-worker-2
+    depends_on:
+      - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker",
+              "--cores", "2", "--memory", "2g", "--webui-port", "8081",
+              "spark://spark-master:7077"]
+    ports:
+      - "8082:8081"
+
+  jupyter:
+    build:
+      context: ./jupyter
+      args:
+        SPARK_VERSION: ${SPARK_VERSION}
+    container_name: jupyter
+    depends_on:
+      - spark-master
+    ports:
+      - "8888:8888"
+      - "4040:4040"
+    volumes:
+      - ./notebooks:/workspace/notebooks
+      - ./data:/workspace/data
